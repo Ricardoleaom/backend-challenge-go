@@ -1,0 +1,234 @@
+package wager
+
+import (
+	"errors"
+	"time"
+
+	"github.com/Ricardoleaom/backend-challenge-go/internal/domain/money"
+)
+
+var (
+	ErrInvalidTransaction = errors.New("invalid wager transaction")
+	ErrInvalidTransition  = errors.New("invalid transaction state transition")
+	ErrInvalidAmount      = errors.New("invalid transaction amount")
+)
+
+type Kind string
+
+const (
+	KindBet      Kind = "BET"
+	KindWin      Kind = "WIN"
+	KindLoss     Kind = "LOSS"
+	KindRefund   Kind = "REFUND"
+	KindRollback Kind = "ROLLBACK"
+)
+
+type Status string
+
+const (
+	StatusPending          Status = "PENDING"
+	StatusPendingReference Status = "PENDING_REFERENCE"
+	StatusProcessed        Status = "PROCESSED"
+	StatusRejected         Status = "REJECTED"
+	StatusFailed           Status = "FAILED"
+)
+
+type Transaction struct {
+	id             string
+	providerID     string
+	externalID     string
+	idempotencyKey string
+	payloadHash    string
+	walletID       string
+	playerID       string
+	roundID        string
+	gameID         string
+	kind           Kind
+	amount         money.Money
+	referenceID    string
+	status         Status
+	failureCode    string
+	createdAt      time.Time
+	updatedAt      time.Time
+}
+
+type Input struct {
+	ID             string
+	ProviderID     string
+	ExternalID     string
+	IdempotencyKey string
+	PayloadHash    string
+	WalletID       string
+	PlayerID       string
+	RoundID        string
+	GameID         string
+	Kind           Kind
+	Amount         money.Money
+	ReferenceID    string
+}
+
+// New creates an external transaction in PENDING state.
+func New(input Input) (Transaction, error) {
+	if input.ID == "" ||
+		input.ProviderID == "" ||
+		input.ExternalID == "" ||
+		input.IdempotencyKey == "" ||
+		input.PayloadHash == "" ||
+		input.WalletID == "" ||
+		input.PlayerID == "" ||
+		input.RoundID == "" ||
+		input.GameID == "" ||
+		input.Amount.Currency() == "" {
+		return Transaction{}, ErrInvalidTransaction
+	}
+
+	if err := validateOperation(input.Kind, input.Amount, input.ReferenceID); err != nil {
+		return Transaction{}, err
+	}
+
+	now := time.Now().UTC()
+
+	return Transaction{
+		id:             input.ID,
+		providerID:     input.ProviderID,
+		externalID:     input.ExternalID,
+		idempotencyKey: input.IdempotencyKey,
+		payloadHash:    input.PayloadHash,
+		walletID:       input.WalletID,
+		playerID:       input.PlayerID,
+		roundID:        input.RoundID,
+		gameID:         input.GameID,
+		kind:           input.Kind,
+		amount:         input.Amount,
+		referenceID:    input.ReferenceID,
+		status:         StatusPending,
+		createdAt:      now,
+		updatedAt:      now,
+	}, nil
+}
+
+func validateOperation(kind Kind, amount money.Money, referenceID string) error {
+	units := amount.AmountInMinorUnits()
+
+	switch kind {
+	case KindBet, KindWin:
+		if units <= 0 {
+			return ErrInvalidAmount
+		}
+	case KindLoss:
+		if units != 0 {
+			return ErrInvalidAmount
+		}
+	case KindRefund, KindRollback:
+		if units <= 0 || referenceID == "" {
+			return ErrInvalidAmount
+		}
+	default:
+		return ErrInvalidTransaction
+	}
+
+	return nil
+}
+
+func (t Transaction) ID() string {
+	return t.id
+}
+
+func (t Transaction) ProviderID() string {
+	return t.providerID
+}
+
+func (t Transaction) ExternalID() string {
+	return t.externalID
+}
+
+func (t Transaction) WalletID() string {
+	return t.walletID
+}
+
+func (t Transaction) PlayerID() string {
+	return t.playerID
+}
+
+func (t Transaction) RoundID() string {
+	return t.roundID
+}
+
+func (t Transaction) GameID() string {
+	return t.gameID
+}
+
+func (t Transaction) Kind() Kind {
+	return t.kind
+}
+
+func (t Transaction) Amount() money.Money {
+	return t.amount
+}
+
+func (t Transaction) ReferenceID() string {
+	return t.referenceID
+}
+
+func (t Transaction) Status() Status {
+	return t.status
+}
+
+func (t Transaction) FailureCode() string {
+	return t.failureCode
+}
+
+func (t Transaction) CreatedAt() time.Time {
+	return t.createdAt
+}
+
+func (t Transaction) UpdatedAt() time.Time {
+	return t.updatedAt
+}
+
+func (t *Transaction) MarkPendingReference() error {
+	if !t.canTransition() {
+		return ErrInvalidTransition
+	}
+
+	t.status = StatusPendingReference
+	t.updatedAt = time.Now().UTC()
+	return nil
+}
+
+func (t *Transaction) MarkProcessed() error {
+	if !t.canTransition() {
+		return ErrInvalidTransition
+	}
+
+	t.status = StatusProcessed
+	t.updatedAt = time.Now().UTC()
+	return nil
+}
+
+func (t *Transaction) Reject(failureCode string) error {
+	if !t.canTransition() || failureCode == "" {
+		return ErrInvalidTransition
+	}
+
+	t.status = StatusRejected
+	t.failureCode = failureCode
+	t.updatedAt = time.Now().UTC()
+	return nil
+}
+
+func (t *Transaction) Fail(failureCode string) error {
+	if !t.canTransition() || failureCode == "" {
+		return ErrInvalidTransition
+	}
+
+	t.status = StatusFailed
+	t.failureCode = failureCode
+	t.updatedAt = time.Now().UTC()
+	return nil
+}
+
+func (t Transaction) canTransition() bool {
+	return t.status == StatusPending ||
+		t.status == StatusPendingReference
+}
