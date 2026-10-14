@@ -240,3 +240,40 @@ func (t Transaction) IdempotencyKey() string {
 func (t Transaction) PayloadHash() string {
 	return t.payloadHash
 }
+
+func Rehydrate(
+	input Input,
+	status Status,
+	failureCode string,
+	createdAt time.Time,
+	updatedAt time.Time,
+) (Transaction, error) {
+	if createdAt.IsZero() || updatedAt.IsZero() || updatedAt.Before(createdAt) {
+		return Transaction{}, ErrInvalidTransaction
+	}
+
+	transaction, err := New(input)
+	if err != nil {
+		return Transaction{}, err
+	}
+
+	switch status {
+	case StatusPending, StatusPendingReference, StatusProcessed:
+		if failureCode != "" {
+			return Transaction{}, ErrInvalidTransaction
+		}
+	case StatusRejected, StatusFailed:
+		if failureCode == "" {
+			return Transaction{}, ErrInvalidTransaction
+		}
+	default:
+		return Transaction{}, ErrInvalidTransaction
+	}
+
+	transaction.status = status
+	transaction.failureCode = failureCode
+	transaction.createdAt = createdAt
+	transaction.updatedAt = updatedAt
+
+	return transaction, nil
+}
