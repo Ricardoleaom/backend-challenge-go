@@ -125,12 +125,15 @@ func (m Money) Subtract(other Money) (Money, error) {
 		return Money{}, err
 	}
 
-	if (other.minorUnits < 0 && m.minorUnits > math.MaxInt64+other.minorUnits) ||
-		(other.minorUnits > 0 && m.minorUnits < math.MaxInt64+other.minorUnits) {
+	// Subtracting a negative number can overflow at MaxInt64.
+	if other.minorUnits < 0 &&
+		m.minorUnits > math.MaxInt64+other.minorUnits {
 		return Money{}, ErrOverflow
 	}
 
-	if other.minorUnits < 0 && m.minorUnits > math.MaxInt64+other.minorUnits {
+	// Subtracting a positive number can overflow at MinInt64.
+	if other.minorUnits > 0 &&
+		m.minorUnits < math.MinInt64+other.minorUnits {
 		return Money{}, ErrOverflow
 	}
 

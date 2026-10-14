@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"errors"
+	"math"
 	"time"
 
 	"github.com/Ricardoleaom/backend-challenge-go/internal/domain/money"
@@ -12,6 +13,7 @@ var (
 	ErrInvalidAmount       = errors.New("amount must be greater than zero")
 	ErrInsufficientBalance = errors.New("insufficient wallet balance")
 	ErrCurrencyMismatch    = errors.New("wallet currency mismatch")
+	ErrVersionOverflow     = errors.New("wallet version overflow")
 )
 
 type Wallet struct {
@@ -99,6 +101,10 @@ func (w *Wallet) Credit(amount money.Money) error {
 		return err
 	}
 
+	if err := w.validateVersionIncrement(); err != nil {
+		return err
+	}
+
 	newBalance, err := w.balance.Add(amount)
 	if err != nil {
 		return err
@@ -113,6 +119,10 @@ func (w *Wallet) Credit(amount money.Money) error {
 
 func (w *Wallet) Debit(amount money.Money) error {
 	if err := w.validateMovement(amount); err != nil {
+		return err
+	}
+
+	if err := w.validateVersionIncrement(); err != nil {
 		return err
 	}
 
@@ -143,6 +153,14 @@ func (w Wallet) validateMovement(amount money.Money) error {
 
 	if amount.Currency() != w.balance.Currency() {
 		return ErrCurrencyMismatch
+	}
+
+	return nil
+}
+
+func (w Wallet) validateVersionIncrement() error {
+	if w.version == math.MaxInt64 {
+		return ErrVersionOverflow
 	}
 
 	return nil

@@ -232,3 +232,11 @@ func (t Transaction) canTransition() bool {
 	return t.status == StatusPending ||
 		t.status == StatusPendingReference
 }
+
+func (t Transaction) IdempotencyKey() string {
+	return t.idempotencyKey
+}
+
+func (t Transaction) PayloadHash() string {
+	return t.payloadHash
+}

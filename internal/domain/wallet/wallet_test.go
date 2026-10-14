@@ -2,6 +2,7 @@ package wallet
 
 import (
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -238,5 +239,40 @@ func TestRehydrateRejectsInvalidData(t *testing.T) {
 				t.Fatalf("expected invalid wallet, got %v", err)
 			}
 		})
+	}
+}
+
+func TestCreditRejectsVersionOverflow(t *testing.T) {
+	zero, err := money.Zero("BRL")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+
+	w, err := Rehydrate(
+		"wallet-1",
+		"player-1",
+		zero,
+		math.MaxInt64,
+		now,
+		now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	one, err := money.New("1.00", "BRL")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = w.Credit(one)
+	if !errors.Is(err, ErrVersionOverflow) {
+		t.Fatalf("expected ErrVersionOverflow, got %v", err)
+	}
+
+	if w.Balance().AmountInMinorUnits() != 0 {
+		t.Fatal("balance changed after version overflow")
 	}
 }
