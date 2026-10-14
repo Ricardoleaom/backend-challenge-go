@@ -1,0 +1,174 @@
+package postgres
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"os"
+	"testing"
+	"time"
+)
+
+func setupWalletWriterTest(t *testing.T, walletID string, balance int64) (*sql.DB, context.Context) {
+	t.Helper()
+
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("DATABASE_URL is not set; skipping PostgreSQL integration test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	db, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open PostgreSQL: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close PostgreSQL: %v", err)
+		}
+	})
+
+	_, err = db.ExecContext(ctx, `DELETE FROM wallets WHERE id = $1`, walletID)
+	if err != nil {
+		t.Fatalf("remove previous test wallet: %v", err)
+	}
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO wallets (
+			id, player_id, currency, balance_minor_units, version
+		)
+		VALUES ($1, $2, 'BRL', $3, 1)
+	`, walletID, "22222222-2222-4222-8222-222222222222", balance)
+	if err != nil {
+		t.Fatalf("create test wallet: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_, err := db.ExecContext(
+			context.Background(),
+			`DELETE FROM wallets WHERE id = $1`,
+			walletID,
+		)
+		if err != nil {
+			t.Errorf("clean up test wallet: %v", err)
+		}
+	})
+
+	return db, ctx
+}
+
+func TestDebitWalletSuccess(t *testing.T) {
+	const walletID = "31111111-1111-4111-8111-111111111111"
+
+	db, ctx := setupWalletWriterTest(t, walletID, 10000)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+
+	balance, version, err := DebitWallet(ctx, tx, walletID, 3000, "BRL")
+	if err != nil {
+		t.Fatalf("DebitWallet: %v", err)
+	}
+
+	if balance != 7000 {
+		t.Errorf("balance = %d, want 7000", balance)
+	}
+	if version != 2 {
+		t.Errorf("version = %d, want 2", version)
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit transaction: %v", err)
+	}
+
+	var persistedBalance int64
+	err = db.QueryRowContext(
+		ctx,
+		`SELECT balance_minor_units FROM wallets WHERE id = $1`,
+		walletID,
+	).Scan(&persistedBalance)
+	if err != nil {
+		t.Fatalf("read persisted balance: %v", err)
+	}
+
+	if persistedBalance != 7000 {
+		t.Errorf("persisted balance = %d, want 7000", persistedBalance)
+	}
+}
+
+func TestDebitWalletRejectsInsufficientBalance(t *testing.T) {
+	const walletID = "32222222-2222-4222-8222-222222222222"
+
+	db, ctx := setupWalletWriterTest(t, walletID, 10000)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+
+	_, _, err = DebitWallet(ctx, tx, walletID, 10001, "BRL")
+	if !errors.Is(err, ErrInsufficientBalance) {
+		t.Fatalf("error = %v, want ErrInsufficientBalance", err)
+	}
+
+	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("rollback transaction: %v", err)
+	}
+
+	var balance int64
+	var version int64
+	err = db.QueryRowContext(
+		ctx,
+		`SELECT balance_minor_units, version FROM wallets WHERE id = $1`,
+		walletID,
+	).Scan(&balance, &version)
+	if err != nil {
+		t.Fatalf("read wallet: %v", err)
+	}
+
+	if balance != 10000 || version != 1 {
+		t.Errorf("wallet changed after rejected debit: balance=%d version=%d", balance, version)
+	}
+}
+
+func TestDebitWalletRollbackRestoresBalance(t *testing.T) {
+	const walletID = "33333333-3333-4333-8333-333333333333"
+
+	db, ctx := setupWalletWriterTest(t, walletID, 10000)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	_, _, err = DebitWallet(ctx, tx, walletID, 3000, "BRL")
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("DebitWallet: %v", err)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback transaction: %v", err)
+	}
+
+	var balance int64
+	var version int64
+	err = db.QueryRowContext(
+		ctx,
+		`SELECT balance_minor_units, version FROM wallets WHERE id = $1`,
+		walletID,
+	).Scan(&balance, &version)
+	if err != nil {
+		t.Fatalf("read wallet after rollback: %v", err)
+	}
+
+	if balance != 10000 || version != 1 {
+		t.Errorf("rollback did not restore wallet: balance=%d version=%d", balance, version)
+	}
+}
