@@ -2,12 +2,35 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 )
+
+func newTestID(t *testing.T) string {
+	t.Helper()
+
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		t.Fatalf("generate test ID: %v", err)
+	}
+
+	bytes[6] = (bytes[6] & 0x0f) | 0x40
+	bytes[8] = (bytes[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf(
+		"%08x-%04x-%04x-%04x-%012x",
+		bytes[0:4],
+		bytes[4:6],
+		bytes[6:8],
+		bytes[8:10],
+		bytes[10:16],
+	)
+}
 
 func setupWalletWriterTest(t *testing.T, walletID string, balance int64) (*sql.DB, context.Context) {
 	t.Helper()
@@ -29,38 +52,21 @@ func setupWalletWriterTest(t *testing.T, walletID string, balance int64) (*sql.D
 			t.Errorf("close PostgreSQL: %v", err)
 		}
 	})
-
-	_, err = db.ExecContext(ctx, `DELETE FROM wallets WHERE id = $1`, walletID)
-	if err != nil {
-		t.Fatalf("remove previous test wallet: %v", err)
-	}
-
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO wallets (
 			id, player_id, currency, balance_minor_units, version
 		)
 		VALUES ($1, $2, 'BRL', $3, 1)
-	`, walletID, "22222222-2222-4222-8222-222222222222", balance)
+	`, walletID, newTestID(t), balance)
 	if err != nil {
 		t.Fatalf("create test wallet: %v", err)
 	}
-
-	t.Cleanup(func() {
-		_, err := db.ExecContext(
-			context.Background(),
-			`DELETE FROM wallets WHERE id = $1`,
-			walletID,
-		)
-		if err != nil {
-			t.Errorf("clean up test wallet: %v", err)
-		}
-	})
 
 	return db, ctx
 }
 
 func TestDebitWalletSuccess(t *testing.T) {
-	const walletID = "31111111-1111-4111-8111-111111111111"
+	walletID := newTestID(t)
 
 	db, ctx := setupWalletWriterTest(t, walletID, 10000)
 
@@ -102,7 +108,7 @@ func TestDebitWalletSuccess(t *testing.T) {
 }
 
 func TestDebitWalletRejectsInsufficientBalance(t *testing.T) {
-	const walletID = "32222222-2222-4222-8222-222222222222"
+	walletID := newTestID(t)
 
 	db, ctx := setupWalletWriterTest(t, walletID, 10000)
 
@@ -138,7 +144,7 @@ func TestDebitWalletRejectsInsufficientBalance(t *testing.T) {
 }
 
 func TestDebitWalletRollbackRestoresBalance(t *testing.T) {
-	const walletID = "33333333-3333-4333-8333-333333333333"
+	walletID := newTestID(t)
 
 	db, ctx := setupWalletWriterTest(t, walletID, 10000)
 
@@ -174,7 +180,7 @@ func TestDebitWalletRollbackRestoresBalance(t *testing.T) {
 }
 
 func TestCreditWalletSuccess(t *testing.T) {
-	const walletID = "41111111-1111-4111-8111-111111111111"
+	walletID := newTestID(t)
 
 	db, ctx := setupWalletWriterTest(t, walletID, 10000)
 
@@ -220,7 +226,7 @@ func TestCreditWalletSuccess(t *testing.T) {
 }
 
 func TestCreditWalletRejectsCurrencyMismatch(t *testing.T) {
-	const walletID = "42222222-2222-4222-8222-222222222222"
+	walletID := newTestID(t)
 
 	db, ctx := setupWalletWriterTest(t, walletID, 10000)
 
@@ -237,7 +243,7 @@ func TestCreditWalletRejectsCurrencyMismatch(t *testing.T) {
 }
 
 func TestCreditWalletRejectsBalanceOverflow(t *testing.T) {
-	const walletID = "43333333-3333-4333-8333-333333333333"
+	walletID := newTestID(t)
 
 	maxInt64 := int64(^uint64(0) >> 1)
 	db, ctx := setupWalletWriterTest(t, walletID, maxInt64-5)
@@ -269,7 +275,7 @@ func TestCreditWalletRejectsBalanceOverflow(t *testing.T) {
 }
 
 func TestCreditWalletRejectsVersionOverflow(t *testing.T) {
-	const walletID = "44444444-4444-4444-8444-444444444444"
+	walletID := newTestID(t)
 
 	maxInt64 := int64(^uint64(0) >> 1)
 	db, ctx := setupWalletWriterTest(t, walletID, 10000)
@@ -297,7 +303,7 @@ func TestCreditWalletRejectsVersionOverflow(t *testing.T) {
 }
 
 func TestCreditWalletRollbackRestoresBalance(t *testing.T) {
-	const walletID = "45555555-5555-4555-8555-555555555555"
+	walletID := newTestID(t)
 
 	db, ctx := setupWalletWriterTest(t, walletID, 10000)
 
