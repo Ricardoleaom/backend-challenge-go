@@ -238,3 +238,45 @@ func (r *TransactionRepository) GetByExternalID(
 
 	return r.GetByID(ctx, id)
 }
+
+// UpdateStatus persists the current status of a transaction.
+func (r *TransactionRepository) UpdateStatus(
+	ctx context.Context,
+	tx *sql.Tx,
+	transaction wager.Transaction,
+) error {
+	if tx == nil {
+		return errors.New("update transaction status: nil database transaction")
+	}
+
+	const query = `
+        UPDATE transactions
+        SET status = $1,
+            failure_code = NULLIF($2, ''),
+            updated_at = $3
+        WHERE id = $4
+    `
+
+	result, err := tx.ExecContext(
+		ctx,
+		query,
+		string(transaction.Status()),
+		transaction.FailureCode(),
+		transaction.UpdatedAt(),
+		transaction.ID(),
+	)
+	if err != nil {
+		return fmt.Errorf("update transaction status: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check transaction status update: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return ErrTransactionNotFound
+	}
+
+	return nil
+}
