@@ -90,11 +90,21 @@ certo em vez de um erro genérico.
 ### O teste de 100.00 / duas apostas de 80.00
 
 `TestConcurrentBetsOnSameWallet` (`internal/application/wager/service_test.go`)
-dispara duas goroutines reais contra o mesmo `*sql.DB`, cada uma com sua
-própria chave de idempotência, e verifica: uma processada, uma rejeitada
-por `INSUFFICIENT_BALANCE`, saldo final `20.00`, e exatamente um lançamento
-no ledger. O mesmo cenário foi reproduzido manualmente via HTTP contra o
-stack completo em Docker (dois `curl` em paralelo) com o mesmo resultado.
+dispara duas apostas reais em paralelo, cada uma a partir de um `Service`
+com seu próprio `*sql.DB` (duas conexões independentes, não duas goroutines
+compartilhando uma), e verifica: uma processada, uma rejeitada por
+`INSUFFICIENT_BALANCE`, saldo final `20.00`, e exatamente um lançamento no
+ledger. O mesmo cenário foi reproduzido manualmente via HTTP contra o stack
+completo em Docker (dois `curl` em paralelo) com o mesmo resultado.
+
+`TestConcurrentBetsAcrossThreeIndependentInstances` repete a ideia com três
+instâncias de `Service`, cada uma com seu próprio `*sql.DB`, disputando a
+mesma carteira (três apostas de 40.00 sobre um saldo de 100.00, das quais
+só duas cabem). `TestFiftyConcurrentDuplicateSubmissions` também passou a
+distribuir as 50 submissões entre três instâncias em vez de uma. O
+controle de concorrência em si está no banco (seção 3), não em memória do
+processo Go, então o resultado não depende de quantas instâncias existem;
+esses testes existem para demonstrar isso, como pede o enunciado.
 
 ## 4. Idempotência
 
@@ -269,6 +279,11 @@ a goroutine sinalizar que terminou, antes de devolver o controle. Isso é
 o que torna o encerramento observável em vez de "atira e esquece". O
 servidor HTTP usa `http.Server.Shutdown(ctx)`, que já implementa
 "para de aceitar conexões novas, espera as em andamento" nativamente.
+
+`TestFxAppStartsAndStopsCleanly` (`cmd/api/main_test.go`) sobe a composição
+inteira (os cinco módulos e os quatro `fx.Invoke`) contra o stack real e
+confere que `Start` e `Stop` terminam sem erro, incluindo a espera dos três
+workers em background saírem de fato antes do `Stop` retornar.
 
 O domínio (`internal/domain/...`) não importa Fx, HTTP, SQS nem bibliotecas
 de persistência. Só `internal/application` e `internal/infrastructure`

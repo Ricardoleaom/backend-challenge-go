@@ -162,7 +162,30 @@ Os testes do pacote `internal/application/wager` cobrem o cenário
 obrigatório de concorrência (`TestConcurrentBetsOnSameWallet`: carteira
 com 100.00 BRL recebendo duas apostas de 80.00 BRL ao mesmo tempo) e o de
 duplicidade (`TestFiftyConcurrentDuplicateSubmissions`: a mesma aposta 50
-vezes em paralelo).
+vezes em paralelo). Ambos, mais `TestConcurrentBetsAcrossThreeIndependentInstances`,
+rodam cada submissão a partir de um `Service` com seu próprio `*sql.DB`,
+simulando processos de aplicação independentes disputando a mesma carteira,
+não só goroutines de um único processo.
+
+`cmd/api` tem um teste (`TestFxAppStartsAndStopsCleanly`) que sobe a
+composição Fx inteira (todos os módulos e workers do `main.go`) e confere
+que o start e o stop terminam sem erro, com liberação dos workers em
+background. Ele precisa do ambiente completo (Postgres, Keycloak e
+LocalStack) e é pulado se `DATABASE_URL`, `JWKS_URL`,
+`SQS_TRANSACTIONS_QUEUE_URL` ou `SQS_EVENTS_QUEUE_URL` não estiverem
+definidas. Para rodá-lo, suba a stack completa e exporte as mesmas
+variáveis usadas pelo serviço `app` no `compose.yaml`:
+
+```sh
+docker compose up -d postgres keycloak localstack
+
+DATABASE_URL="postgres://app:local_dev_password@localhost:5432/backend_challenge?sslmode=disable" \
+JWKS_URL="http://localhost:8081/realms/wagering/protocol/openid-connect/certs" \
+SQS_ENDPOINT="http://localhost:4566" \
+SQS_TRANSACTIONS_QUEUE_URL="http://localhost:4566/000000000000/wager-transactions.fifo" \
+SQS_EVENTS_QUEUE_URL="http://localhost:4566/000000000000/wager-events.fifo" \
+  go test ./cmd/api/... -race
+```
 
 ## Lint
 
