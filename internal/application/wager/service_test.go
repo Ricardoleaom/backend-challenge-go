@@ -439,9 +439,17 @@ func TestSubmitRefundBeforeReferenceArrivesGoesPendingThenResolves(t *testing.T)
 // wallet with 100.00 BRL receives two concurrent 80.00 BRL bets. Exactly one
 // must process, the other must be rejected for insufficient balance, the
 // final balance must be 20.00 BRL, and there must be a single ledger entry.
+// TestConcurrentBetsOnSameWallet is the scenario the edital names
+// explicitly: a 100.00 BRL wallet gets two concurrent 80.00 BRL bets, one
+// must process and one must be rejected for insufficient balance. Each bet
+// comes from its own Service backed by its own *sql.DB, standing in for two
+// independent application processes racing on the same wallet row.
 func TestConcurrentBetsOnSameWallet(t *testing.T) {
-	service, db, ctx := newTestService(t)
+	serviceA, db, ctx := newTestService(t)
+	serviceB, _, _ := newTestService(t)
 	walletID := createTestWallet(t, ctx, db, "100.00")
+
+	services := []*Service{serviceA, serviceB}
 
 	var wg sync.WaitGroup
 	results := make([]Result, 2)
@@ -453,7 +461,7 @@ func TestConcurrentBetsOnSameWallet(t *testing.T) {
 		go func(i int, externalID string) {
 			defer wg.Done()
 			input := betInput(walletID, "provider-a", externalID, mustMoney(t, "80.00"))
-			results[i], errs[i] = service.Submit(ctx, input)
+			results[i], errs[i] = services[i].Submit(ctx, input)
 		}(i, externalID)
 	}
 	wg.Wait()
@@ -494,13 +502,83 @@ func TestConcurrentBetsOnSameWallet(t *testing.T) {
 	}
 }
 
-// TestFiftyConcurrentDuplicateSubmissions sends the same bet 50 times in
-// parallel and checks a single debit results, exercising the inbox-less
-// (application-level) idempotency guarantee under real contention.
-func TestFiftyConcurrentDuplicateSubmissions(t *testing.T) {
-	service, db, ctx := newTestService(t)
+// TestConcurrentBetsAcrossThreeIndependentInstances repeats the same-wallet
+// race from TestConcurrentBetsOnSameWallet across three Service values, each
+// with its own *sql.DB, the minimum the edital asks for when demonstrating
+// concurrency guarantees. Three 40.00 BRL bets hit a 100.00 BRL wallet: any
+// two fit (80.00), a third never does, so exactly two must process and one
+// must be rejected no matter which instance wins the race.
+func TestConcurrentBetsAcrossThreeIndependentInstances(t *testing.T) {
+	serviceA, db, ctx := newTestService(t)
+	serviceB, _, _ := newTestService(t)
+	serviceC, _, _ := newTestService(t)
 	walletID := createTestWallet(t, ctx, db, "100.00")
 
+	services := []*Service{serviceA, serviceB, serviceC}
+
+	var wg sync.WaitGroup
+	results := make([]Result, len(services))
+	errs := make([]error, len(services))
+
+	for i, svc := range services {
+		wg.Add(1)
+		externalID := newTestID(t)
+		go func(i int, svc *Service, externalID string) {
+			defer wg.Done()
+			input := betInput(walletID, "provider-a", externalID, mustMoney(t, "40.00"))
+			results[i], errs[i] = svc.Submit(ctx, input)
+		}(i, svc, externalID)
+	}
+	wg.Wait()
+
+	processed, rejected := 0, 0
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Submit[%d]: %v", i, err)
+		}
+		switch results[i].Status {
+		case domainwager.StatusProcessed:
+			processed++
+		case domainwager.StatusRejected:
+			rejected++
+		default:
+			t.Fatalf("unexpected status[%d]: %s", i, results[i].Status)
+		}
+	}
+
+	if processed != 2 || rejected != 1 {
+		t.Fatalf("processed=%d rejected=%d, want 2 and 1", processed, rejected)
+	}
+
+	var balance int64
+	if err := db.QueryRowContext(ctx, `SELECT balance_minor_units FROM wallets WHERE id = $1`, walletID).Scan(&balance); err != nil {
+		t.Fatalf("read final balance: %v", err)
+	}
+	if balance != 2000 {
+		t.Errorf("final balance = %d, want 2000", balance)
+	}
+
+	var ledgerCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ledger_entries WHERE wallet_id = $1`, walletID).Scan(&ledgerCount); err != nil {
+		t.Fatalf("count ledger entries: %v", err)
+	}
+	if ledgerCount != 2 {
+		t.Errorf("ledger entries = %d, want 2", ledgerCount)
+	}
+}
+
+// TestFiftyConcurrentDuplicateSubmissions sends the same bet 50 times in
+// parallel, spread round-robin across three independent Service instances
+// (three separate *sql.DB), and checks a single debit results. This
+// exercises the persisted idempotency guarantee under real contention
+// across processes, not just across goroutines of one process.
+func TestFiftyConcurrentDuplicateSubmissions(t *testing.T) {
+	serviceA, db, ctx := newTestService(t)
+	serviceB, _, _ := newTestService(t)
+	serviceC, _, _ := newTestService(t)
+	walletID := createTestWallet(t, ctx, db, "100.00")
+
+	services := []*Service{serviceA, serviceB, serviceC}
 	input := betInput(walletID, "provider-a", newTestID(t), mustMoney(t, "25.00"))
 
 	const attempts = 50
@@ -512,7 +590,7 @@ func TestFiftyConcurrentDuplicateSubmissions(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			results[i], errs[i] = service.Submit(ctx, input)
+			results[i], errs[i] = services[i%len(services)].Submit(ctx, input)
 		}(i)
 	}
 	wg.Wait()
