@@ -4,10 +4,13 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/MicahParks/keyfunc/v3"
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/Ricardoleaom/backend-challenge-go/internal/observability"
 )
 
 type contextKey string
@@ -40,33 +43,39 @@ func (c claims) hasRole(role string) bool {
 // Authenticator validates bearer tokens against the IdP's JWKS.
 type Authenticator struct {
 	keyfunc keyfunc.Keyfunc
+	metrics *observability.Metrics
 }
 
-func NewAuthenticator(ctx context.Context, jwksURL string) (*Authenticator, error) {
+func NewAuthenticator(ctx context.Context, jwksURL string, metrics *observability.Metrics) (*Authenticator, error) {
 	kf, err := keyfunc.NewDefaultCtx(ctx, []string{jwksURL})
 	if err != nil {
 		return nil, fmt.Errorf("fetch JWKS from %s: %w", jwksURL, err)
 	}
 
-	return &Authenticator{keyfunc: kf}, nil
+	return &Authenticator{keyfunc: kf, metrics: metrics}, nil
 }
 
 // Middleware rejects requests without a valid bearer token and puts the
 // authenticated identity (provider ID, or internal-service flag) in the
-// request context for handlers to authorize against.
+// request context for handlers to authorize against. Requests it rejects
+// never reach metricsMiddleware wrapping the protected routes (see
+// handler.go), so it records http_requests_total for them itself.
 func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header := r.Header.Get("Authorization")
 		tokenString, ok := strings.CutPrefix(header, "Bearer ")
 		if !ok || tokenString == "" {
-			writeError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "missing bearer token")
+			a.rejectUnauthenticated(w, r, "missing bearer token")
 			return
 		}
 
 		var parsed claims
-		_, err := jwt.ParseWithClaims(tokenString, &parsed, a.keyfunc.Keyfunc)
+		_, err := jwt.ParseWithClaims(
+			tokenString, &parsed, a.keyfunc.Keyfunc,
+			jwt.WithValidMethods([]string{"RS256"}),
+		)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "UNAUTHENTICATED", "invalid or expired token")
+			a.rejectUnauthenticated(w, r, "invalid or expired token")
 			return
 		}
 
@@ -80,6 +89,13 @@ func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (a *Authenticator) rejectUnauthenticated(w http.ResponseWriter, r *http.Request, message string) {
+	writeError(w, http.StatusUnauthorized, "UNAUTHENTICATED", message)
+	a.metrics.HTTPRequestsTotal.WithLabelValues(
+		r.Pattern, normalizeMethod(r.Method), strconv.Itoa(http.StatusUnauthorized),
+	).Inc()
 }
 
 func providerIDFromContext(ctx context.Context) (string, bool) {

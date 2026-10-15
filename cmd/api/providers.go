@@ -46,13 +46,13 @@ func newDB(lc fx.Lifecycle, cfg config.Config) (*sql.DB, error) {
 
 // newAuthenticator retries JWKS discovery for a while, since Keycloak may
 // still be starting up when this process does in docker compose.
-func newAuthenticator(cfg config.Config) (*httpapi.Authenticator, error) {
+func newAuthenticator(cfg config.Config, metrics *observability.Metrics) (*httpapi.Authenticator, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	var lastErr error
 	for attempt := 0; attempt < 12; attempt++ {
-		auth, err := httpapi.NewAuthenticator(ctx, cfg.JWKSURL)
+		auth, err := httpapi.NewAuthenticator(ctx, cfg.JWKSURL, metrics)
 		if err == nil {
 			return auth, nil
 		}

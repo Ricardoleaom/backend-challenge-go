@@ -50,24 +50,48 @@ func NewHandler(deps Dependencies) http.Handler {
 	)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health/live", healthLive)
-	mux.HandleFunc("GET /health/ready", h.healthReady)
-	mux.Handle("GET /metrics", deps.Metrics.Handler())
-	mux.Handle("/", deps.Auth.Middleware(protected))
+	mux.Handle("GET /health/live", metricsMiddleware(deps.Metrics, http.HandlerFunc(healthLive)))
+	mux.Handle("GET /health/ready", metricsMiddleware(deps.Metrics, http.HandlerFunc(h.healthReady)))
+	mux.Handle("GET /metrics", metricsMiddleware(deps.Metrics, deps.Metrics.Handler()))
 
-	return metricsMiddleware(deps.Metrics, mux)
+	// Auth.Middleware calls r.WithContext to attach the authenticated
+	// identity, which (per net/http's own semantics) hands `protected` a
+	// copy of the request, not the original pointer. metricsMiddleware has
+	// to wrap `protected` specifically, on the inside of that copy, or it
+	// would only ever see the outer "/" catch-all pattern instead of the
+	// actual matched route for every successfully authenticated request.
+	// Auth itself records metrics for the requests it rejects, since those
+	// never reach this inner wrapper at all.
+	mux.Handle("/", deps.Auth.Middleware(metricsMiddleware(deps.Metrics, protected)))
+
+	return mux
 }
 
 // metricsMiddleware records every response by route pattern, method and
-// status, feeding http_requests_total.
+// status, feeding http_requests_total. r.Pattern is always a registered
+// mux pattern or empty, so it can't be used to inflate cardinality, but
+// r.Method is whatever string the client sent on the request line: an
+// attacker could otherwise mint an unbounded number of label values by
+// varying it, so it's normalized to a known method or "OTHER" first.
 func metricsMiddleware(metrics *observability.Metrics, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
 		metrics.HTTPRequestsTotal.WithLabelValues(
-			r.Pattern, r.Method, strconv.Itoa(recorder.status),
+			r.Pattern, normalizeMethod(r.Method), strconv.Itoa(recorder.status),
 		).Inc()
 	})
+}
+
+func normalizeMethod(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodConnect,
+		http.MethodOptions, http.MethodTrace:
+		return method
+	default:
+		return "OTHER"
+	}
 }
 
 type statusRecorder struct {
