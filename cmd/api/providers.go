@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
-	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -19,12 +18,6 @@ import (
 	"github.com/Ricardoleaom/backend-challenge-go/internal/infrastructure/sqsx"
 	"github.com/Ricardoleaom/backend-challenge-go/internal/observability"
 )
-
-func newLogger() *slog.Logger {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
-	return logger
-}
 
 func newDB(lc fx.Lifecycle, cfg config.Config) (*sql.DB, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

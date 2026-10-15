@@ -1,7 +1,11 @@
 package main
 
 import (
+	"log/slog"
+	"os"
+
 	"go.uber.org/fx"
+	"go.uber.org/fx/fxevent"
 
 	walletapp "github.com/Ricardoleaom/backend-challenge-go/internal/application/wallet"
 	"github.com/Ricardoleaom/backend-challenge-go/internal/config"
@@ -13,7 +17,6 @@ import (
 var configModule = fx.Module("config",
 	fx.Provide(
 		config.Load,
-		newLogger,
 		observability.New,
 	),
 )
@@ -60,7 +63,17 @@ var httpModule = fx.Module("http",
 )
 
 func main() {
+	// Set before Fx starts so its own lifecycle events and every component
+	// logging through slog's default share the same JSON output.
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	fx.New(
+		fx.WithLogger(func() fxevent.Logger {
+			fxLogger := &fxevent.SlogLogger{Logger: logger}
+			fxLogger.UseLogLevel(slog.LevelDebug)
+			return fxLogger
+		}),
 		configModule,
 		persistenceModule,
 		applicationModule,
