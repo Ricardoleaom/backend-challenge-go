@@ -567,6 +567,54 @@ func TestConcurrentBetsAcrossThreeIndependentInstances(t *testing.T) {
 	}
 }
 
+// TestDistinctWalletsProcessConcurrently fires bets on ten different wallets
+// at once from three independent instances. Each wallet is its own row, so
+// none of them should wait on or interfere with another.
+func TestDistinctWalletsProcessConcurrently(t *testing.T) {
+	serviceA, db, ctx := newTestService(t)
+	serviceB, _, _ := newTestService(t)
+	serviceC, _, _ := newTestService(t)
+	services := []*Service{serviceA, serviceB, serviceC}
+
+	const wallets = 10
+	walletIDs := make([]string, wallets)
+	for i := range walletIDs {
+		walletIDs[i] = createTestWallet(t, ctx, db, "100.00")
+	}
+
+	var wg sync.WaitGroup
+	results := make([]Result, wallets)
+	errs := make([]error, wallets)
+
+	for i, walletID := range walletIDs {
+		wg.Add(1)
+		externalID := newTestID(t)
+		go func(i int, walletID, externalID string) {
+			defer wg.Done()
+			input := betInput(walletID, "provider-a", externalID, mustMoney(t, "30.00"))
+			results[i], errs[i] = services[i%len(services)].Submit(ctx, input)
+		}(i, walletID, externalID)
+	}
+	wg.Wait()
+
+	for i, walletID := range walletIDs {
+		if errs[i] != nil {
+			t.Fatalf("Submit[%d]: %v", i, errs[i])
+		}
+		if results[i].Status != domainwager.StatusProcessed {
+			t.Errorf("wallet %d status = %s, want PROCESSED", i, results[i].Status)
+		}
+
+		var balance int64
+		if err := db.QueryRowContext(ctx, `SELECT balance_minor_units FROM wallets WHERE id = $1`, walletID).Scan(&balance); err != nil {
+			t.Fatalf("read balance of wallet %d: %v", i, err)
+		}
+		if balance != 7000 {
+			t.Errorf("wallet %d balance = %d, want 7000", i, balance)
+		}
+	}
+}
+
 // TestFiftyConcurrentDuplicateSubmissions sends the same bet 50 times in
 // parallel, spread round-robin across three independent Service instances
 // (three separate *sql.DB), and checks a single debit results. This
