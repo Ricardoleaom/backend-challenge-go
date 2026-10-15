@@ -244,7 +244,7 @@ valor tem que ser igual ao da original.
 backoff exponencial (5s, 10s, 20s, 40s... com teto de 5 minutos). O
 `RetryWorker` roda a cada `REFERENCE_RETRY_INTERVAL` (15s), pega até 20
 pendências vencidas e tenta resolver de novo. Depois de 8 tentativas sem
-sucesso (alguns minutos no total), rejeita com
+sucesso (cerca de 15 minutos no total), rejeita com
 `REFERENCE_NOT_FOUND_TIMEOUT` e publica `WagerTransactionRejected`. Como o
 estado está no banco, a retomada continua depois de um reinício e
 qualquer instância pode assumir.
