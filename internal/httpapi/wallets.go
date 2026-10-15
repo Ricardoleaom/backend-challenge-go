@@ -12,8 +12,6 @@ import (
 	"time"
 
 	walletapp "github.com/Ricardoleaom/backend-challenge-go/internal/application/wallet"
-	"github.com/Ricardoleaom/backend-challenge-go/internal/domain/ledger"
-	"github.com/Ricardoleaom/backend-challenge-go/internal/domain/money"
 	"github.com/Ricardoleaom/backend-challenge-go/internal/infrastructure/postgres"
 )
 
@@ -213,86 +211,38 @@ func (h *handler) reconcileWallet(w http.ResponseWriter, r *http.Request) {
 
 	walletID := r.PathValue("id")
 
-	wlt, err := h.deps.Wallets.GetByID(r.Context(), walletID)
+	snapshot, err := h.deps.Ledger.ReconciliationSnapshot(r.Context(), walletID)
 	if err != nil {
 		if errors.Is(err, postgres.ErrWalletNotFound) {
 			writeError(w, http.StatusNotFound, "WALLET_NOT_FOUND", "wallet not found")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not load wallet")
-		return
-	}
-
-	calculated, err := money.Zero(wlt.Balance().Currency())
-	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not reconcile wallet")
 		return
 	}
 
-	checked := 0
-	var afterCreatedAt time.Time
-	var afterID string
-	for {
-		entries, err := h.deps.Ledger.ListByWallet(r.Context(), walletID, afterCreatedAt, afterID, 500)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not read ledger")
-			return
-		}
-		if len(entries) == 0 {
-			break
-		}
-
-		for _, e := range entries {
-			calculated, err = applyEntry(calculated, e)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not reconcile wallet")
-				return
-			}
-			checked++
-		}
-
-		last := entries[len(entries)-1]
-		afterCreatedAt, afterID = last.CreatedAt(), last.ID()
-		if len(entries) < 500 {
-			break
-		}
-	}
-
-	difference, err := wlt.Balance().Subtract(calculated)
+	difference, err := snapshot.StoredBalance.Subtract(snapshot.CalculatedBalance)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not compare balances")
 		return
 	}
 
-	cmp, err := wlt.Balance().Compare(calculated)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "could not compare balances")
-		return
-	}
-
-	consistent := cmp == 0
+	consistent := difference.AmountInMinorUnits() == 0
 	if !consistent {
 		h.deps.Metrics.ReconciliationMismatches.Inc()
 		slog.Error("wallet reconciliation mismatch",
-			"wallet_id", walletID,
-			"stored_balance", wlt.Balance().String(),
-			"calculated_balance", calculated.String(),
+			"walletId", walletID,
+			"storedBalance", snapshot.StoredBalance.String(),
+			"calculatedBalance", snapshot.CalculatedBalance.String(),
 		)
 	}
 
 	writeJSON(w, http.StatusOK, reconciliationResponse{
 		WalletID:          walletID,
-		StoredBalance:     toMoneyDTO(wlt.Balance()),
-		CalculatedBalance: toMoneyDTO(calculated),
+		StoredBalance:     toMoneyDTO(snapshot.StoredBalance),
+		CalculatedBalance: toMoneyDTO(snapshot.CalculatedBalance),
 		Difference:        toMoneyDTO(difference),
 		Consistent:        consistent,
-		CheckedEntries:    checked,
+		CheckedEntries:    snapshot.CheckedEntries,
 	})
-}
-
-func applyEntry(balance money.Money, e ledger.Entry) (money.Money, error) {
-	if e.Direction() == ledger.DirectionCredit {
-		return balance.Add(e.Amount())
-	}
-	return balance.Subtract(e.Amount())
 }

@@ -150,6 +150,72 @@ func (r *LedgerRepository) ListByWallet(
 	return entries, nil
 }
 
+type ReconciliationSnapshot struct {
+	StoredBalance     money.Money
+	CalculatedBalance money.Money
+	CheckedEntries    int
+}
+
+// ReconciliationSnapshot reads the stored balance and the ledger totals in a
+// single statement. Postgres gives one statement one snapshot, so both sides
+// of the comparison see the same committed data even while other
+// transactions keep moving the wallet.
+func (r *LedgerRepository) ReconciliationSnapshot(ctx context.Context, walletID string) (ReconciliationSnapshot, error) {
+	const query = `
+		SELECT
+			w.balance_minor_units,
+			w.currency,
+			COALESCE(SUM(le.amount_delta_minor_units), 0)::BIGINT,
+			COUNT(le.id)
+		FROM wallets w
+		LEFT JOIN ledger_entries le ON le.wallet_id = w.id
+		WHERE w.id = $1
+		GROUP BY w.id
+	`
+
+	var (
+		stored     int64
+		currency   string
+		calculated int64
+		count      int
+	)
+	err := r.db.QueryRowContext(ctx, query, walletID).Scan(&stored, &currency, &calculated, &count)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ReconciliationSnapshot{}, ErrWalletNotFound
+		}
+		return ReconciliationSnapshot{}, fmt.Errorf("read reconciliation snapshot: %w", err)
+	}
+
+	storedMoney, err := money.New(formatMinorUnits(stored), currency)
+	if err != nil {
+		return ReconciliationSnapshot{}, fmt.Errorf("reconstruct stored balance: %w", err)
+	}
+	calculatedMoney, err := signedMoney(calculated, currency)
+	if err != nil {
+		return ReconciliationSnapshot{}, fmt.Errorf("reconstruct calculated balance: %w", err)
+	}
+
+	return ReconciliationSnapshot{
+		StoredBalance:     storedMoney,
+		CalculatedBalance: calculatedMoney,
+		CheckedEntries:    count,
+	}, nil
+}
+
+// signedMoney allows a negative result: a corrupted ledger could sum below
+// zero, and reconciliation must report that instead of failing to build it.
+func signedMoney(units int64, currency string) (money.Money, error) {
+	if units >= 0 {
+		return money.New(formatMinorUnits(units), currency)
+	}
+	positive, err := money.New(formatMinorUnits(-units), currency)
+	if err != nil {
+		return money.Money{}, err
+	}
+	return positive.Negate()
+}
+
 type scannable interface {
 	Scan(dest ...any) error
 }
