@@ -6,8 +6,5 @@
 *.test
 *.out
 
-# Personal interview-prep notes not part of the challenge deliverable
-INTERVIEW.md
-
 # Local planning notes, not part of the challenge deliverable
 docs/
