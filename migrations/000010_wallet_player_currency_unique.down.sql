@@ -1,0 +1,1 @@
+DROP INDEX idx_wallets_player_currency_unique;

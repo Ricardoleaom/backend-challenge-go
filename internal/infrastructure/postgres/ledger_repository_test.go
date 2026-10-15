@@ -7,6 +7,9 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/Ricardoleaom/backend-challenge-go/internal/domain/ledger"
+	"github.com/Ricardoleaom/backend-challenge-go/internal/domain/money"
 )
 
 func setupLedgerTest(t *testing.T) (*sql.DB, context.Context) {
@@ -63,7 +66,7 @@ func TestLedgerRepositoryAppendAndGetByTransactionID(t *testing.T) {
 		INSERT INTO wallets (
 			id, player_id, currency, balance_minor_units, version
 		)
-		VALUES ($1, $2, 'BRL', 8000, 2)
+		VALUES ($1, $2, 'BRL', 7000, 2)
 	`, walletID, playerID)
 	if err != nil {
 		t.Fatalf("insert test wallet: %v", err)
@@ -84,71 +87,76 @@ func TestLedgerRepositoryAppendAndGetByTransactionID(t *testing.T) {
 		t.Fatalf("insert test transaction: %v", err)
 	}
 
-	entry := LedgerEntry{
-		ID:                     entryID,
-		WalletID:               walletID,
-		TransactionID:          transactionID,
-		AmountDeltaMinorUnits:  -1000,
-		BalanceAfterMinorUnits: 7000,
+	before, err := money.New("8000.00", "BRL")
+	if err != nil {
+		t.Fatalf("money.New before: %v", err)
+	}
+	amount, err := money.New("1000.00", "BRL")
+	if err != nil {
+		t.Fatalf("money.New amount: %v", err)
+	}
+	after, err := money.New("7000.00", "BRL")
+	if err != nil {
+		t.Fatalf("money.New after: %v", err)
+	}
+
+	entry, err := ledger.New(
+		entryID, walletID, transactionID,
+		ledger.DirectionDebit,
+		amount, before, after,
+		time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatalf("ledger.New: %v", err)
 	}
 
 	if err := repository.Append(ctx, tx, entry); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 
-	var got LedgerEntry
+	var gotID, gotWalletID, gotTransactionID, gotDirection string
+	var gotBalanceAfter int64
+	var gotCreatedAt time.Time
 
 	err = tx.QueryRowContext(ctx, `
 		SELECT
 			id,
 			wallet_id,
 			transaction_id,
-			amount_delta_minor_units,
+			direction,
 			balance_after_minor_units,
 			created_at
 		FROM ledger_entries
 		WHERE transaction_id = $1
 	`, transactionID).Scan(
-		&got.ID,
-		&got.WalletID,
-		&got.TransactionID,
-		&got.AmountDeltaMinorUnits,
-		&got.BalanceAfterMinorUnits,
-		&got.CreatedAt,
+		&gotID,
+		&gotWalletID,
+		&gotTransactionID,
+		&gotDirection,
+		&gotBalanceAfter,
+		&gotCreatedAt,
 	)
 	if err != nil {
 		t.Fatalf("read appended ledger entry: %v", err)
 	}
 
-	if got.ID != entryID {
-		t.Errorf("ID = %q, want %q", got.ID, entryID)
+	if gotID != entryID {
+		t.Errorf("ID = %q, want %q", gotID, entryID)
 	}
-	if got.WalletID != walletID {
-		t.Errorf("WalletID = %q, want %q", got.WalletID, walletID)
+	if gotWalletID != walletID {
+		t.Errorf("WalletID = %q, want %q", gotWalletID, walletID)
 	}
-	if got.TransactionID != transactionID {
-		t.Errorf(
-			"TransactionID = %q, want %q",
-			got.TransactionID,
-			transactionID,
-		)
+	if gotTransactionID != transactionID {
+		t.Errorf("TransactionID = %q, want %q", gotTransactionID, transactionID)
 	}
-	if got.AmountDeltaMinorUnits != -1000 {
-		t.Errorf(
-			"AmountDeltaMinorUnits = %d, want %d",
-			got.AmountDeltaMinorUnits,
-			-1000,
-		)
+	if gotDirection != "DEBIT" {
+		t.Errorf("direction = %q, want DEBIT", gotDirection)
 	}
-	if got.BalanceAfterMinorUnits != 7000 {
-		t.Errorf(
-			"BalanceAfterMinorUnits = %d, want %d",
-			got.BalanceAfterMinorUnits,
-			7000,
-		)
+	if gotBalanceAfter != 700000 {
+		t.Errorf("balance after = %d, want 700000", gotBalanceAfter)
 	}
-	if got.CreatedAt.IsZero() {
-		t.Error("expected CreatedAt to be populated")
+	if gotCreatedAt.IsZero() {
+		t.Error("expected created_at to be populated")
 	}
 }
 

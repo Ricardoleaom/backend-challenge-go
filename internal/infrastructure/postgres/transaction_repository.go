@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -48,6 +49,7 @@ func (r *TransactionRepository) Create(
 			game_id,
 			kind,
 			amount_minor_units,
+			reference_external_id,
 			reference_id,
 			status,
 			failure_code,
@@ -55,9 +57,10 @@ func (r *TransactionRepository) Create(
 			updated_at
 		)
 		VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8,
-			$9, $10, $11, NULLIF($12, ''), $13,
-			NULLIF($14, ''), $15, $16
+			$1, NULLIF($2, ''), NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''),
+			$6, $7, NULLIF($8, ''), NULLIF($9, ''),
+			$10, $11, NULLIF($12, ''), NULLIF($13, ''), $14,
+			NULLIF($15, ''), $16, $17
 		)
 	`
 
@@ -75,7 +78,8 @@ func (r *TransactionRepository) Create(
 		transaction.GameID(),
 		string(transaction.Kind()),
 		transaction.Amount().AmountInMinorUnits(),
-		transaction.ReferenceID(),
+		transaction.ReferenceExternalID(),
+		transaction.ResolvedReferenceID(),
 		string(transaction.Status()),
 		transaction.FailureCode(),
 		transaction.CreatedAt(),
@@ -112,6 +116,7 @@ func (r *TransactionRepository) GetByID(
 			t.kind,
 			t.amount_minor_units,
 			w.currency,
+			t.reference_external_id,
 			t.reference_id,
 			t.status,
 			t.failure_code,
@@ -123,31 +128,39 @@ func (r *TransactionRepository) GetByID(
 	`
 
 	var (
-		input       wager.Input
-		kind        string
-		status      string
-		amountUnits int64
-		currency    string
-		referenceID sql.NullString
-		failureCode sql.NullString
-		createdAt   sql.NullTime
-		updatedAt   sql.NullTime
+		input               wager.Input
+		kind                string
+		status              string
+		amountUnits         int64
+		currency            string
+		referenceExternalID sql.NullString
+		resolvedReferenceID sql.NullString
+		failureCode         sql.NullString
+		providerID          sql.NullString
+		externalID          sql.NullString
+		idempotencyKey      sql.NullString
+		payloadHash         sql.NullString
+		roundID             sql.NullString
+		gameID              sql.NullString
+		createdAt           sql.NullTime
+		updatedAt           sql.NullTime
 	)
 
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
 		&input.ID,
-		&input.ProviderID,
-		&input.ExternalID,
-		&input.IdempotencyKey,
-		&input.PayloadHash,
+		&providerID,
+		&externalID,
+		&idempotencyKey,
+		&payloadHash,
 		&input.WalletID,
 		&input.PlayerID,
-		&input.RoundID,
-		&input.GameID,
+		&roundID,
+		&gameID,
 		&kind,
 		&amountUnits,
 		&currency,
-		&referenceID,
+		&referenceExternalID,
+		&resolvedReferenceID,
 		&status,
 		&failureCode,
 		&createdAt,
@@ -171,12 +184,19 @@ func (r *TransactionRepository) GetByID(
 	}
 
 	input.Kind = wager.Kind(kind)
-	input.ReferenceID = referenceID.String
+	input.ProviderID = providerID.String
+	input.ExternalID = externalID.String
+	input.IdempotencyKey = idempotencyKey.String
+	input.PayloadHash = payloadHash.String
+	input.RoundID = roundID.String
+	input.GameID = gameID.String
+	input.ReferenceExternalID = referenceExternalID.String
 
 	transaction, err := wager.Rehydrate(
 		input,
 		wager.Status(status),
 		failureCode.String,
+		resolvedReferenceID.String,
 		createdAt.Time,
 		updatedAt.Time,
 	)
@@ -253,8 +273,9 @@ func (r *TransactionRepository) UpdateStatus(
         UPDATE transactions
         SET status = $1,
             failure_code = NULLIF($2, ''),
-            updated_at = $3
-        WHERE id = $4
+            reference_id = NULLIF($3, ''),
+            updated_at = $4
+        WHERE id = $5
     `
 
 	result, err := tx.ExecContext(
@@ -262,10 +283,15 @@ func (r *TransactionRepository) UpdateStatus(
 		query,
 		string(transaction.Status()),
 		transaction.FailureCode(),
+		transaction.ResolvedReferenceID(),
 		transaction.UpdatedAt(),
 		transaction.ID(),
 	)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return fmt.Errorf("%w: %s", ErrTransactionConflict, pgErr.ConstraintName)
+		}
 		return fmt.Errorf("update transaction status: %w", err)
 	}
 
@@ -279,4 +305,134 @@ func (r *TransactionRepository) UpdateStatus(
 	}
 
 	return nil
+}
+
+// LockByID reads a transaction and locks its row for the caller's database
+// transaction, serializing concurrent reversal attempts against the same
+// referenced transaction.
+func (r *TransactionRepository) LockByID(
+	ctx context.Context,
+	tx *sql.Tx,
+	id string,
+) (wager.Transaction, error) {
+	var locked string
+	err := tx.QueryRowContext(
+		ctx,
+		`SELECT id FROM transactions WHERE id = $1 FOR UPDATE`,
+		id,
+	).Scan(&locked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return wager.Transaction{}, ErrTransactionNotFound
+	}
+	if err != nil {
+		return wager.Transaction{}, fmt.Errorf("lock transaction: %w", err)
+	}
+
+	return r.GetByID(ctx, id)
+}
+
+// HasSuccessfulReversal reports whether the referenced transaction already
+// has a PROCESSED REFUND or ROLLBACK against it. Call after LockByID so the
+// check observes a consistent, serialized view.
+func (r *TransactionRepository) HasSuccessfulReversal(
+	ctx context.Context,
+	tx *sql.Tx,
+	providerID string,
+	referencedInternalID string,
+) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(
+		ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM transactions
+			WHERE provider_id = $1
+			  AND reference_id = $2
+			  AND status = 'PROCESSED'
+			  AND kind IN ('REFUND', 'ROLLBACK')
+		)`,
+		providerID,
+		referencedInternalID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check existing reversal: %w", err)
+	}
+
+	return exists, nil
+}
+
+// ScheduleReferenceRetry bumps the retry counter for a PENDING_REFERENCE
+// transaction whose reference could still not be resolved.
+func (r *TransactionRepository) ScheduleReferenceRetry(
+	ctx context.Context,
+	tx *sql.Tx,
+	transactionID string,
+	attempts int,
+	nextAttemptAt time.Time,
+) error {
+	if tx == nil {
+		return errors.New("schedule reference retry: nil database transaction")
+	}
+
+	const query = `
+		UPDATE transactions
+		SET reference_attempts = $1,
+		    reference_next_attempt_at = $2,
+		    updated_at = NOW()
+		WHERE id = $3
+	`
+
+	_, err := tx.ExecContext(ctx, query, attempts, nextAttemptAt, transactionID)
+	if err != nil {
+		return fmt.Errorf("schedule reference retry: %w", err)
+	}
+
+	return nil
+}
+
+type DuePendingReference struct {
+	Transaction wager.Transaction
+	Attempts    int
+}
+
+// ListDuePendingReferences returns PENDING_REFERENCE transactions whose next
+// retry attempt is due.
+func (r *TransactionRepository) ListDuePendingReferences(
+	ctx context.Context,
+	limit int,
+) ([]DuePendingReference, error) {
+	const query = `
+		SELECT id, reference_attempts
+		FROM transactions
+		WHERE status = 'PENDING_REFERENCE'
+		  AND (reference_next_attempt_at IS NULL OR reference_next_attempt_at <= NOW())
+		ORDER BY reference_next_attempt_at NULLS FIRST
+		LIMIT $1
+	`
+
+	rows, err := r.db.QueryContext(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list due pending references: %w", err)
+	}
+	defer rows.Close()
+
+	var due []DuePendingReference
+	for rows.Next() {
+		var id string
+		var attempts int
+		if err := rows.Scan(&id, &attempts); err != nil {
+			return nil, fmt.Errorf("scan pending reference: %w", err)
+		}
+
+		transaction, err := r.GetByID(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("load pending reference transaction: %w", err)
+		}
+
+		due = append(due, DuePendingReference{Transaction: transaction, Attempts: attempts})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending references: %w", err)
+	}
+
+	return due, nil
 }

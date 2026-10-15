@@ -92,16 +92,22 @@ func (m Money) Currency() string {
 }
 
 func (m Money) String() string {
-	// Format without negating the value, wich could overflow at MinInt64.
+	return fmt.Sprintf("%s %s", m.DecimalString(), m.currency)
+}
+
+// DecimalString renders the amount alone, with no currency code, in the
+// external decimal contract (e.g. "25.00", "-10.50").
+func (m Money) DecimalString() string {
+	// Format without negating the value, which could overflow at MinInt64.
 	if m.minorUnits < 0 {
-		whole := uint64(-(m.minorUnits + 1))
+		// minorUnits+1 is always in [MinInt64+1, 0], so its negation fits
+		// in [0, MaxInt64] and this conversion can never overflow.
+		whole := uint64(-(m.minorUnits + 1)) //nolint:gosec // see comment above
 		whole++
-		return fmt.Sprintf("-%d.%02d %s",
-			whole/100, whole%100, m.currency)
+		return fmt.Sprintf("-%d.%02d", whole/100, whole%100)
 	}
 
-	return fmt.Sprintf("%d.%02d %s",
-		m.minorUnits/100, m.minorUnits%100, m.currency)
+	return fmt.Sprintf("%d.%02d", m.minorUnits/100, m.minorUnits%100)
 }
 
 func (m Money) Add(other Money) (Money, error) {
@@ -154,7 +160,7 @@ func (m Money) Negate() (Money, error) {
 	}, nil
 }
 
-// Comapre returns -1 when m < other, 0 when equal, and 1 when m > other.
+// Compare returns -1 when m < other, 0 when equal, and 1 when m > other.
 func (m Money) Compare(other Money) (int, error) {
 	if err := m.checkCurrency(other); err != nil {
 		return 0, err

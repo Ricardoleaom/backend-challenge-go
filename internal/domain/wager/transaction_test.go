@@ -16,18 +16,18 @@ func testInput(t *testing.T, kind Kind, amount string, reference string) Input {
 	}
 
 	return Input{
-		ID:             "tx-1",
-		ProviderID:     "provider-1",
-		ExternalID:     "external-1",
-		IdempotencyKey: "provider-1:external-1",
-		PayloadHash:    "hash-1",
-		WalletID:       "wallet-1",
-		PlayerID:       "player-1",
-		RoundID:        "round-1",
-		GameID:         "game-1",
-		Kind:           kind,
-		Amount:         value,
-		ReferenceID:    reference,
+		ID:                  "tx-1",
+		ProviderID:          "provider-1",
+		ExternalID:          "external-1",
+		IdempotencyKey:      "provider-1:external-1",
+		PayloadHash:         "hash-1",
+		WalletID:            "wallet-1",
+		PlayerID:            "player-1",
+		RoundID:             "round-1",
+		GameID:              "game-1",
+		Kind:                kind,
+		Amount:              value,
+		ReferenceExternalID: reference,
 	}
 }
 

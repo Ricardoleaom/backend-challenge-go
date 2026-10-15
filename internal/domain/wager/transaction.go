@@ -16,6 +16,7 @@ var (
 type Kind string
 
 const (
+	KindOpening  Kind = "OPENING"
 	KindBet      Kind = "BET"
 	KindWin      Kind = "WIN"
 	KindLoss     Kind = "LOSS"
@@ -34,84 +35,91 @@ const (
 )
 
 type Transaction struct {
-	id             string
-	providerID     string
-	externalID     string
-	idempotencyKey string
-	payloadHash    string
-	walletID       string
-	playerID       string
-	roundID        string
-	gameID         string
-	kind           Kind
-	amount         money.Money
-	referenceID    string
-	status         Status
-	failureCode    string
-	createdAt      time.Time
-	updatedAt      time.Time
+	id                  string
+	providerID          string
+	externalID          string
+	idempotencyKey      string
+	payloadHash         string
+	walletID            string
+	playerID            string
+	roundID             string
+	gameID              string
+	kind                Kind
+	amount              money.Money
+	referenceExternalID string
+	resolvedReferenceID string
+	status              Status
+	failureCode         string
+	createdAt           time.Time
+	updatedAt           time.Time
 }
 
 type Input struct {
-	ID             string
-	ProviderID     string
-	ExternalID     string
-	IdempotencyKey string
-	PayloadHash    string
-	WalletID       string
-	PlayerID       string
-	RoundID        string
-	GameID         string
-	Kind           Kind
-	Amount         money.Money
-	ReferenceID    string
+	ID                  string
+	ProviderID          string
+	ExternalID          string
+	IdempotencyKey      string
+	PayloadHash         string
+	WalletID            string
+	PlayerID            string
+	RoundID             string
+	GameID              string
+	Kind                Kind
+	Amount              money.Money
+	ReferenceExternalID string
 }
 
-// New creates an external transaction in PENDING state.
+// New creates a transaction in PENDING state. OPENING is reserved for
+// internal wallet creation and does not carry provider/external metadata.
 func New(input Input) (Transaction, error) {
 	if input.ID == "" ||
-		input.ProviderID == "" ||
-		input.ExternalID == "" ||
-		input.IdempotencyKey == "" ||
-		input.PayloadHash == "" ||
 		input.WalletID == "" ||
 		input.PlayerID == "" ||
-		input.RoundID == "" ||
-		input.GameID == "" ||
 		input.Amount.Currency() == "" {
 		return Transaction{}, ErrInvalidTransaction
 	}
 
-	if err := validateOperation(input.Kind, input.Amount, input.ReferenceID); err != nil {
+	if input.Kind != KindOpening {
+		if input.ProviderID == "" ||
+			input.ExternalID == "" ||
+			input.IdempotencyKey == "" ||
+			input.PayloadHash == "" ||
+			input.RoundID == "" ||
+			input.GameID == "" {
+			return Transaction{}, ErrInvalidTransaction
+		}
+	}
+
+	if err := validateOperation(input.Kind, input.Amount, input.ReferenceExternalID); err != nil {
 		return Transaction{}, err
 	}
 
 	now := time.Now().UTC()
 
 	return Transaction{
-		id:             input.ID,
-		providerID:     input.ProviderID,
-		externalID:     input.ExternalID,
-		idempotencyKey: input.IdempotencyKey,
-		payloadHash:    input.PayloadHash,
-		walletID:       input.WalletID,
-		playerID:       input.PlayerID,
-		roundID:        input.RoundID,
-		gameID:         input.GameID,
-		kind:           input.Kind,
-		amount:         input.Amount,
-		referenceID:    input.ReferenceID,
-		status:         StatusPending,
-		createdAt:      now,
-		updatedAt:      now,
+		id:                  input.ID,
+		providerID:          input.ProviderID,
+		externalID:          input.ExternalID,
+		idempotencyKey:      input.IdempotencyKey,
+		payloadHash:         input.PayloadHash,
+		walletID:            input.WalletID,
+		playerID:            input.PlayerID,
+		roundID:             input.RoundID,
+		gameID:              input.GameID,
+		kind:                input.Kind,
+		amount:              input.Amount,
+		referenceExternalID: input.ReferenceExternalID,
+		status:              StatusPending,
+		createdAt:           now,
+		updatedAt:           now,
 	}, nil
 }
 
-func validateOperation(kind Kind, amount money.Money, referenceID string) error {
+func validateOperation(kind Kind, amount money.Money, referenceExternalID string) error {
 	units := amount.AmountInMinorUnits()
 
 	switch kind {
-	case KindBet, KindWin:
+	case KindOpening, KindBet, KindWin:
 		if units <= 0 {
 			return ErrInvalidAmount
 		}
@@ -120,7 +128,7 @@ func validateOperation(kind Kind, amount money.Money, referenceID string) error 
 			return ErrInvalidAmount
 		}
 	case KindRefund, KindRollback:
-		if units <= 0 || referenceID == "" {
+		if units <= 0 || referenceExternalID == "" {
 			return ErrInvalidAmount
 		}
 	default:
@@ -166,8 +174,24 @@ func (t Transaction) Amount() money.Money {
 	return t.amount
 }
 
-func (t Transaction) ReferenceID() string {
-	return t.referenceID
+func (t Transaction) ReferenceExternalID() string {
+	return t.referenceExternalID
+}
+
+func (t Transaction) ResolvedReferenceID() string {
+	return t.resolvedReferenceID
+}
+
+// ResolveReference records the internal ID of the transaction this one
+// references, once resolved. It does not change status.
+func (t *Transaction) ResolveReference(internalID string) error {
+	if !t.canTransition() || internalID == "" {
+		return ErrInvalidTransition
+	}
+
+	t.resolvedReferenceID = internalID
+	t.updatedAt = time.Now().UTC()
+	return nil
 }
 
 func (t Transaction) Status() Status {
@@ -245,6 +269,7 @@ func Rehydrate(
 	input Input,
 	status Status,
 	failureCode string,
+	resolvedReferenceID string,
 	createdAt time.Time,
 	updatedAt time.Time,
 ) (Transaction, error) {
@@ -256,6 +281,8 @@ func Rehydrate(
 	if err != nil {
 		return Transaction{}, err
 	}
+
+	transaction.resolvedReferenceID = resolvedReferenceID
 
 	switch status {
 	case StatusPending, StatusPendingReference, StatusProcessed:
