@@ -60,7 +60,7 @@ func New(amount, currency string) (Money, error) {
 
 }
 
-// Zero creates a rero amount for a currency.
+// Zero creates a zero amount for a currency.
 func Zero(currency string) (Money, error) {
 	if !validCurrency(currency) {
 		return Money{}, ErrInvalidCurrency
