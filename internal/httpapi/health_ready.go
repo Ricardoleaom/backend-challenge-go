@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -19,7 +20,8 @@ func (h *handler) healthReady(w http.ResponseWriter, r *http.Request) {
 	ready := true
 
 	if err := h.deps.DB.PingContext(ctx); err != nil {
-		checks["postgres"] = err.Error()
+		slog.Error("readiness check failed", "dependency", "postgres", "error", err)
+		checks["postgres"] = "unavailable"
 		ready = false
 	} else {
 		checks["postgres"] = "ok"
@@ -27,7 +29,8 @@ func (h *handler) healthReady(w http.ResponseWriter, r *http.Request) {
 
 	for _, checker := range h.deps.ReadinessCheckers {
 		if err := checker.Ready(ctx); err != nil {
-			checks[checker.Name()] = err.Error()
+			slog.Error("readiness check failed", "dependency", checker.Name(), "error", err)
+			checks[checker.Name()] = "unavailable"
 			ready = false
 		} else {
 			checks[checker.Name()] = "ok"
