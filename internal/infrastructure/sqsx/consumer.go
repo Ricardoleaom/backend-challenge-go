@@ -83,9 +83,10 @@ func NewConsumer(
 	}
 }
 
-// Run polls until ctx is canceled. On SIGTERM the caller cancels ctx, which
-// stops new ReceiveMessage calls; in-flight messages still being processed
-// finish naturally since they are not waiting on the context.
+// Run polls until ctx is canceled. On shutdown Fx cancels ctx: no new
+// ReceiveMessage starts, and a message mid-processing has its open SQL
+// transaction aborted instead of committed, so it is never deleted and
+// becomes visible again after the visibility timeout for a safe redelivery.
 func (c *Consumer) Run(ctx context.Context) error {
 	for {
 		if ctx.Err() != nil {
@@ -114,20 +115,36 @@ func (c *Consumer) Run(ctx context.Context) error {
 }
 
 func (c *Consumer) handle(ctx context.Context, msg sqstypes.Message) {
-	messageID := aws.ToString(msg.MessageId)
+	sqsMessageID := aws.ToString(msg.MessageId)
 
 	var envelope messageEnvelope
 	if err := json.Unmarshal([]byte(aws.ToString(msg.Body)), &envelope); err != nil {
 		// A malformed body will never parse; let it exhaust the redrive
 		// policy's maxReceiveCount and land in the DLQ instead of looping
 		// here forever.
-		slog.Error("invalid SQS message body", "error", err, "message_id", messageID)
+		slog.Error("invalid SQS message body", "error", err, "sqsMessageId", sqsMessageID)
 		return
 	}
 
+	// The envelope's messageId is the durable identity, not the SQS one: a
+	// producer that resends the same envelope gets a brand new SQS MessageId.
+	messageID := envelope.MessageID
+	if messageID == "" {
+		slog.Error("SQS message without envelope messageId", "sqsMessageId", sqsMessageID)
+		return
+	}
+
+	logger := slog.With(
+		"transport", "sqs",
+		"messageId", messageID,
+		"correlationId", messageID,
+		"providerId", envelope.Data.ProviderID,
+		"walletId", envelope.Data.WalletID,
+	)
+
 	amount, err := money.New(envelope.Data.Money.Amount, envelope.Data.Money.Currency)
 	if err != nil {
-		slog.Error("invalid money in SQS message", "error", err, "message_id", messageID)
+		logger.Error("invalid money in SQS message", "error", err)
 		return
 	}
 
@@ -147,31 +164,39 @@ func (c *Consumer) handle(ctx context.Context, msg sqstypes.Message) {
 
 	payloadHash, err := wagerapp.ComputePayloadHash(input)
 	if err != nil {
-		slog.Error("compute payload hash", "error", err, "message_id", messageID)
+		logger.Error("compute payload hash", "error", err)
 		return
 	}
 
 	alreadyCompleted, err := c.recordInbox(ctx, messageID, payloadHash)
 	if err != nil {
-		slog.Error("record inbox message", "error", err, "message_id", messageID)
+		logger.Error("record inbox message", "error", err)
 		return
 	}
 	if alreadyCompleted {
-		c.ack(ctx, msg)
+		logger.Info("duplicate SQS delivery acknowledged from inbox")
+		c.ack(ctx, msg, logger)
 		return
 	}
 
-	if _, err := c.wager.Submit(ctx, input); err != nil {
-		slog.Error("process wager transaction from SQS", "error", err, "message_id", messageID)
+	result, err := c.wager.Submit(ctx, input)
+	if err != nil {
+		logger.Error("process wager transaction from SQS", "error", err)
 		return
 	}
 
 	if err := c.completeInbox(ctx, messageID); err != nil {
-		slog.Error("complete inbox message", "error", err, "message_id", messageID)
+		logger.Error("complete inbox message", "error", err)
 		return
 	}
 
-	c.ack(ctx, msg)
+	logger.Info("wager transaction handled",
+		"transactionId", result.TransactionID,
+		"status", result.Status,
+		"failureCode", result.FailureCode,
+		"idempotentReplay", result.IdempotentReplay,
+	)
+	c.ack(ctx, msg, logger)
 }
 
 func (c *Consumer) recordInbox(ctx context.Context, messageID, payloadHash string) (alreadyCompleted bool, err error) {
@@ -207,12 +232,12 @@ func (c *Consumer) completeInbox(ctx context.Context, messageID string) error {
 	return dbTx.Commit()
 }
 
-func (c *Consumer) ack(ctx context.Context, msg sqstypes.Message) {
+func (c *Consumer) ack(ctx context.Context, msg sqstypes.Message, logger *slog.Logger) {
 	_, err := c.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(c.queueURL),
 		ReceiptHandle: msg.ReceiptHandle,
 	})
 	if err != nil {
-		slog.Error("delete processed SQS message", "error", err, "message_id", aws.ToString(msg.MessageId))
+		logger.Error("delete processed SQS message", "error", err)
 	}
 }

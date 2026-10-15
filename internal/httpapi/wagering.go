@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	wagerapp "github.com/Ricardoleaom/backend-challenge-go/internal/application/wager"
@@ -86,10 +87,22 @@ func (h *handler) submitWagerTransaction(w http.ResponseWriter, r *http.Request)
 		Amount:              amount,
 		ReferenceExternalID: req.ReferenceExternalTransactionID,
 	})
+	logger := slog.With("transport", "http", "providerId", providerID, "walletId", req.WalletID)
 	if err != nil {
+		logger.Error("submit wager transaction", "externalTransactionId", req.ExternalTransactionID, "error", err)
 		writeSubmitError(w, err)
 		return
 	}
+
+	// Without an inbound correlation ID, the use case correlates the outbox
+	// events by transaction ID, so the log uses the same value.
+	logger.Info("wager transaction handled",
+		"correlationId", result.TransactionID,
+		"transactionId", result.TransactionID,
+		"status", result.Status,
+		"failureCode", result.FailureCode,
+		"idempotentReplay", result.IdempotentReplay,
+	)
 
 	h.deps.Metrics.WagerTransactionsTotal.WithLabelValues(string(result.Status)).Inc()
 	if result.IdempotentReplay {
