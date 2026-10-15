@@ -15,5 +15,69 @@ services:
       timeout: 3s
       retries: 10
 
+  migrate:
+    image: migrate/migrate:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    entrypoint:
+      - migrate
+      - -path=/migrations
+      - -database=postgres://app:local_dev_password@postgres:5432/backend_challenge?sslmode=disable
+      - up
+    restart: "no"
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    volumes:
+      - ./deploy/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    ports:
+      - "8081:8080"
+
+  localstack:
+    image: localstack/localstack:3.8
+    environment:
+      SERVICES: sqs
+      DEFAULT_REGION: us-east-1
+    ports:
+      - "4566:4566"
+    volumes:
+      - ./deploy/localstack/init-queues.sh:/etc/localstack/init/ready.d/init-queues.sh:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_started
+      localstack:
+        condition: service_healthy
+    environment:
+      HTTP_PORT: "8080"
+      DATABASE_URL: postgres://app:local_dev_password@postgres:5432/backend_challenge?sslmode=disable
+      JWKS_URL: http://keycloak:8080/realms/wagering/protocol/openid-connect/certs
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SQS_ENDPOINT: http://localstack:4566
+      SQS_TRANSACTIONS_QUEUE_URL: http://localstack:4566/000000000000/wager-transactions.fifo
+      SQS_EVENTS_QUEUE_URL: http://localstack:4566/000000000000/wager-events.fifo
+    ports:
+      - "8080:8080"
+
 volumes:
   postgres_data:
