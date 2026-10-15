@@ -1,0 +1,13 @@
+# Local environment overrides
+.env
+
+# Go build artifacts
+/bin/
+*.test
+*.out
+
+# Personal interview-prep notes not part of the challenge deliverable
+INTERVIEW.md
+
+# Local planning notes, not part of the challenge deliverable
+docs/

@@ -1,0 +1,25 @@
+version: "2"
+
+linters:
+  enable:
+    - gosec
+    - revive
+    - misspell
+    - unconvert
+    - gocritic
+  settings:
+    errcheck:
+      exclude-functions:
+        - (*database/sql.Tx).Rollback
+        - (*database/sql.Rows).Close
+        - (*database/sql.DB).Close
+    revive:
+      rules:
+        # Keep revive's real correctness/style checks; drop the two rules
+        # that demand a doc comment on every exported name. This codebase
+        # favors short, self-explanatory identifiers over comments that
+        # restate the obvious.
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
