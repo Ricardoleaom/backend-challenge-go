@@ -331,3 +331,15 @@ para implementar sem inventar uma entidade de domínio nova.
   o stack Docker completo). A cobertura automatizada está concentrada no
   domínio e na camada de aplicação, que é onde vivem as garantias
   financeiras eliminatórias.
+- **A identidade do provider não é verificada no caminho SQS.** No HTTP, o
+  JWT prova que quem está chamando é de fato `provider-a` (claim
+  `provider_id` assinada pelo Keycloak). No consumidor SQS, o `providerId`
+  vem só do corpo da mensagem: qualquer entidade com permissão de enviar
+  para a fila compartilhada `wager-transactions.fifo` pode se declarar
+  qualquer provider. O edital define essa garantia como responsabilidade
+  do broker ("o acesso à mensageria deve ser controlado por credenciais e
+  políticas do broker"), e isso exigiria filas ou políticas de IAM
+  segregadas por provider, o que o ambiente de LocalStack usado aqui (uma
+  fila única, credenciais de teste compartilhadas) não modela. Ficou como
+  lacuna documentada em vez de uma simulação de controle que não
+  resolveria o problema de verdade.
