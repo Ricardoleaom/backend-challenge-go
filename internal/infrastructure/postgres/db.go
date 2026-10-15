@@ -20,7 +20,7 @@ func Open(ctx context.Context, databaseURL string) (*sql.DB, error) {
 	db.SetConnMaxLifetime(30 * time.Minute)
 
 	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("ping PostgreSQL: %w", err)
 	}
 
