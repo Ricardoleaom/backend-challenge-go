@@ -394,22 +394,40 @@ type DuePendingReference struct {
 	Attempts    int
 }
 
-// ListDuePendingReferences returns PENDING_REFERENCE transactions whose next
-// retry attempt is due.
+// claimLease is how long ListDuePendingReferences reserves a row for the
+// caller that claimed it. If that caller crashes before processing it (and
+// so never calls ScheduleReferenceRetry or UpdateStatus again), the row
+// becomes eligible again once the lease expires; nothing stays stuck.
+const claimLease = 60 * time.Second
+
+// ListDuePendingReferences atomically claims up to `limit` PENDING_REFERENCE
+// transactions whose next retry attempt is due. The claim uses
+// SELECT ... FOR UPDATE SKIP LOCKED inside the UPDATE, so two instances
+// polling at the same time never claim the same row: this is required for
+// correctness, since processing a row twice concurrently could race on its
+// own status transition (one instance's success getting overwritten by the
+// other's rejection) even though the financial movement itself stays safe
+// behind the transactions table's unique indexes.
 func (r *TransactionRepository) ListDuePendingReferences(
 	ctx context.Context,
 	limit int,
 ) ([]DuePendingReference, error) {
 	const query = `
-		SELECT id, reference_attempts
-		FROM transactions
-		WHERE status = 'PENDING_REFERENCE'
-		  AND (reference_next_attempt_at IS NULL OR reference_next_attempt_at <= NOW())
-		ORDER BY reference_next_attempt_at NULLS FIRST
-		LIMIT $1
+		UPDATE transactions
+		SET reference_next_attempt_at = NOW() + ($2 * INTERVAL '1 second')
+		WHERE id IN (
+			SELECT id
+			FROM transactions
+			WHERE status = 'PENDING_REFERENCE'
+			  AND (reference_next_attempt_at IS NULL OR reference_next_attempt_at <= NOW())
+			ORDER BY reference_next_attempt_at NULLS FIRST
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, reference_attempts
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, limit)
+	rows, err := r.db.QueryContext(ctx, query, limit, claimLease.Seconds())
 	if err != nil {
 		return nil, fmt.Errorf("list due pending references: %w", err)
 	}

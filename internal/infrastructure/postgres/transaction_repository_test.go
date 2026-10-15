@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -295,4 +296,116 @@ func mustRebuildWithIdempotencyKey(
 	}
 
 	return transaction
+}
+
+// TestListDuePendingReferencesClaimsEachRowOnce guards against a race where
+// two instances of the reference-retry worker poll at the same time: before
+// ListDuePendingReferences claimed rows atomically, both could load the same
+// PENDING_REFERENCE transaction and process it concurrently, with one
+// instance's successful result getting overwritten by the other's rejection.
+func TestListDuePendingReferencesClaimsEachRowOnce(t *testing.T) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("DATABASE_URL is not set; skipping PostgreSQL integration test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	db, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open PostgreSQL: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close PostgreSQL: %v", err)
+		}
+	})
+
+	walletID := newTransactionTestID(t)
+	playerID := newTransactionTestID(t)
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO wallets (id, player_id, currency, balance_minor_units, version)
+		VALUES ($1, $2, 'BRL', 10000, 1)
+	`, walletID, playerID)
+	if err != nil {
+		t.Fatalf("create test wallet: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM transactions WHERE wallet_id = $1`, walletID)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM wallets WHERE id = $1`, walletID)
+	})
+
+	const total = 10
+	ids := make([]string, total)
+	for i := range ids {
+		ids[i] = newTransactionTestID(t)
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO transactions (
+				id, provider_id, external_id, idempotency_key, payload_hash,
+				wallet_id, player_id, round_id, game_id, kind,
+				amount_minor_units, status, reference_external_id,
+				reference_next_attempt_at
+			)
+			VALUES (
+				$1, 'test-provider', $2, $2, 'test-hash',
+				$3, $4, 'round-test', 'game-test', 'REFUND',
+				1000, 'PENDING_REFERENCE', 'original-bet-id',
+				NOW()
+			)
+		`, ids[i], ids[i], walletID, playerID)
+		if err != nil {
+			t.Fatalf("create pending reference transaction: %v", err)
+		}
+	}
+
+	dbA, err := Open(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("open second PostgreSQL connection: %v", err)
+	}
+	defer dbA.Close()
+
+	repoMain := NewTransactionRepository(db)
+	repoA := NewTransactionRepository(dbA)
+
+	var wg sync.WaitGroup
+	results := make([][]DuePendingReference, 2)
+	errs := make([]error, 2)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		results[0], errs[0] = repoMain.ListDuePendingReferences(ctx, total)
+	}()
+	go func() {
+		defer wg.Done()
+		results[1], errs[1] = repoA.ListDuePendingReferences(ctx, total)
+	}()
+	wg.Wait()
+
+	if errs[0] != nil {
+		t.Fatalf("ListDuePendingReferences[0]: %v", errs[0])
+	}
+	if errs[1] != nil {
+		t.Fatalf("ListDuePendingReferences[1]: %v", errs[1])
+	}
+
+	seen := make(map[string]int)
+	for _, batch := range results {
+		for _, due := range batch {
+			seen[due.Transaction.ID()]++
+		}
+	}
+
+	for id, count := range seen {
+		if count != 1 {
+			t.Errorf("transaction %s claimed by %d concurrent callers, want 1", id, count)
+		}
+	}
+
+	totalClaimed := len(results[0]) + len(results[1])
+	if totalClaimed != total {
+		t.Errorf("total claimed = %d, want %d (every row claimed exactly once)", totalClaimed, total)
+	}
 }
